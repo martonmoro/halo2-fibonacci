@@ -24,6 +24,7 @@ struct ACell<F: FieldExt>(AssignedCell<F, F>);
 struct FiboConfig {
     pub advice: [Column<Advice>; 3],
     pub selector: Selector,
+    pub instance: Column<Instance>
 }
 
 // The chip struct configures the constraints in the circuit and provides assignment functions
@@ -43,10 +44,15 @@ impl<F: FieldExt> FiboChip<F> {
     // There are two different kinds of selectors:
     //  - Selector - halo2 BE will apply optimizations to the selectors and combine them while preserving which gate gets turned on where
     //  - Complex Selector - used in lookup arguments, selector has to always be binary thus cannot apply selector combining optimizations
-    fn configure(meta: &mut ConstraintSystem<F>) -> FiboConfig {
-        let col_a = meta.advice_column();
-        let col_b = meta.advice_column();
-        let col_c = meta.advice_column();
+    fn configure(
+        meta: &mut ConstraintSystem<F>, 
+        advice: [Column<Advice>; 3], 
+        instance: Column<Instance>
+    ) -> FiboConfig {
+        // We pass them in because they can be shared accross different configs
+        let col_a = advice[0];
+        let col_b = advice[1];
+        let col_c = advice[2];
         let selector = meta.selector();
 
         // Enable the ability to enforce equality over cells in this column
@@ -54,6 +60,7 @@ impl<F: FieldExt> FiboChip<F> {
         meta.enable_equality(col_a);
         meta.enable_equality(col_b);
         meta.enable_equality(col_c);
+        meta.enable_equality(instance);
 
         // Defining a create_gate here applies it over every single column in the circuit.
         // We will use the selector column to decide when to turn this gate on and off, since we probably don't want it on every row
@@ -74,6 +81,7 @@ impl<F: FieldExt> FiboChip<F> {
         FiboConfig {
             advice: [col_a, col_b, col_c],
             selector,
+            instance,
         }
     }
 
@@ -123,6 +131,7 @@ impl<F: FieldExt> FiboChip<F> {
 
                 // copy from previous assigned cells
                 // copy to the current region
+                // permutation check
                 prev_b.0.copy_advice(|| "a", &mut region, self.config.advice[0], 0)?;
                 prev_c.0.copy_advice(|| "b", &mut region, self.config.advice[1], 0)?;
 
@@ -142,6 +151,15 @@ impl<F: FieldExt> FiboChip<F> {
                 Ok(c_cell)
             }
         )
+    }
+
+    pub fn expose_public(
+        &self, 
+        mut layouter: impl Layouter<F>,
+        cell: &ACell<F>,
+        row: usize,         // Absolute index inside the instance column
+    ) -> Result<(), Error> {
+        layouter.constrain_instance(cell.0.cell(), self.config.instance, row)
     }
 }
 
@@ -164,7 +182,11 @@ impl<F: FieldExt> Circuit<F> for MyCircuit<F> {
 
     // Has the arrangement of columns. Called only during keygen, and will just call chip config most of the time
     fn configure(meta: &mut ConstraintSystem<F>) -> Self::Config {
-        FiboChip::configure(meta)
+        let col_a = meta.advice_column();
+        let col_b = meta.advice_column();
+        let col_c = meta.advice_column();
+        let instance = meta.instance_column();
+        FiboChip::configure(meta, [col_a, col_b, col_c], instance)
     }
 
     // Take the output of configure and floorplanner type to make the actual circuit
@@ -173,10 +195,13 @@ impl<F: FieldExt> Circuit<F> for MyCircuit<F> {
     fn synthesize(&self, config: Self::Config, mut layouter: impl Layouter<F>) -> Result<(), Error> {
         let chip = FiboChip::construct(config);
 
-        let (_, mut prev_b, mut prev_c) = chip.assign_first_row(
+        let (prev_a, mut prev_b, mut prev_c) = chip.assign_first_row(
             layouter.namespace(|| "first row"),
             self.a, self.b,
         )?;
+
+        chip.expose_public(layouter.namespace(|| "private a"), &prev_a, 0)?;
+        chip.expose_public(layouter.namespace(|| "private b"), &prev_b, 1)?;
 
         for _i in 3..10 {
             let c_cell = chip.assign_row(
@@ -188,6 +213,8 @@ impl<F: FieldExt> Circuit<F> for MyCircuit<F> {
             prev_c = c_cell; 
         }
 
+        chip.expose_public(layouter.namespace(|| "output"), &prev_c, 2)?;
+
         Ok(())
     }
 }
@@ -196,14 +223,17 @@ fn main() {
     // Circuit size 
     let k =4;
 
-    let a =Fp::from(1);
-    let b = Fp::from(1);
+    let a =Fp::from(1);     // F[0]
+    let b = Fp::from(1);    // F[1]
+    let out = Fp::from(55); // F[9]
 
     let circuit = MyCircuit{
         a: Some(a),
         b: Some(b),
     };
 
-    let prover = MockProver::run(k, &circuit, vec![]).unwrap();
+    let public_input = vec![a, b, out];
+
+    let prover = MockProver::run(k, &circuit, vec![public_input.clone()]).unwrap();
     prover.assert_satisfied();
 }
