@@ -13,6 +13,10 @@ path = "src/example1.rs"
 name = "example2"
 path = "src/example2.rs"
 
+[[bin]]
+name = "is_zero"
+path = "src/is_zero.rs"
+
 [features]
 dev-graph = ["halo2_proofs/dev-graph", "plotters"]
 
